@@ -14752,7 +14752,27 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     _resp_text = _maybe_remap_for_light_mode("#FFF8DC")
 
                 is_error_response = result and (result.get("failed") or result.get("partial"))
-                already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
+                # A transform_llm_output plugin (e.g. the refusal->uncensored
+                # swap, or this repo's own kanban dispatch relay) can replace
+                # `response` with different text than what was already
+                # streamed token-by-token to the terminal -- streaming
+                # necessarily renders before finalize_turn() runs that hook.
+                # Verified live (original repro: session 20260723_143132_0dd814):
+                # the swap was correctly persisted to the durable transcript,
+                # but the interactive CLI kept showing the pre-swap text
+                # forever, since this box was skipped unconditionally whenever
+                # anything had streamed. Force the full Panel render in that
+                # case so the user actually sees the corrected answer, not
+                # just the session history. (Re-derived 2026-07-29, second
+                # time, after the original fix -- commit 2eef8d99 -- was
+                # discarded by a `hermes update` reset; see
+                # agent/turn_finalizer.py's transform_llm_output hook comment
+                # and the switch to a dedicated `local-fixes` branch.)
+                _response_transformed = bool(result and result.get("response_transformed"))
+                already_streamed = (
+                    self._stream_started and self._stream_box_opened
+                    and not is_error_response and not _response_transformed
+                )
                 if use_streaming_tts and _streaming_box_opened and not is_error_response:
                     # Text was already printed sentence-by-sentence; just close the box
                     w = self._scrollback_box_width()
