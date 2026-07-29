@@ -19,6 +19,7 @@ preserved.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -110,6 +111,29 @@ def _relay_moa_reference_event(agent: Any, event: str, **kwargs: Any) -> None:
 def _normalize_route_base_url(base_url: Any) -> str:
     """Canonicalize an endpoint URL for model-route identity comparisons."""
     return normalize_route_base_url(base_url)
+
+
+def _uncensored_mode_persist_disabled(profile_name: str, state_path=None) -> bool:
+    """True if `profile_name` is one of the profiles uncensored-mode
+    switched onto the local uncensored model (see
+    ~/.hermes/plugins/uncensored-mode/state.py's per-profile-keyed backup
+    dict). Reads the plugin's own state file directly rather than
+    importing its Python module -- matches the established cross-plugin
+    state-file-read pattern (local-mode's toggle.py already reads
+    uncensored-mode's state file the same way, and vice versa).
+    Fails safe to False on any read error: privacy suppression must never
+    crash session init, and the failure direction matters -- failing
+    toward "persist normally" only ever risks persisting a session that
+    should have been private (a gap to fix, loudly, if it happens), never
+    the reverse (silently going private for an ordinary session)."""
+    path = state_path or (get_hermes_home() / "uncensored-mode-state.json")
+    try:
+        if not path.exists():
+            return False
+        backup = json.loads(path.read_text())
+        return profile_name in backup
+    except Exception:
+        return False
 
 
 def _provider_default_routes(provider: str) -> set[str]:
@@ -1626,7 +1650,23 @@ def init_agent(
     # (state.db) or the JSON snapshot, regardless of session_id. Set on the
     # background skill/memory review fork so its harness turn can't leak into
     # the user's real session and hijack the next live turn. Default False.
-    agent._persist_disabled = False
+    # Also True for any profile uncensored-mode has switched onto the local
+    # model -- Tony: "when im on uncensored mode, no memory will be saved
+    # or anything that can leave trace."
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        _uncensored_check_profile = get_active_profile_name()
+    except Exception:
+        _uncensored_check_profile = None
+    agent._persist_disabled = (
+        _uncensored_check_profile is not None
+        and _uncensored_mode_persist_disabled(_uncensored_check_profile)
+    )
+    if agent._persist_disabled:
+        # Overrides whatever sessions.write_json_snapshots config set above
+        # (line ~1481-1485) -- uncensored-mode's "no trace" guarantee must
+        # win over a config default, not be silently reverted by it.
+        agent._session_json_enabled = False
     agent._session_init_model_config = {
         "max_iterations": agent.max_iterations,
         "reasoning_config": reasoning_config,
