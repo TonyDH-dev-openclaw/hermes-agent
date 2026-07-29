@@ -5454,6 +5454,7 @@ def run_conversation(
                             FailoverReason.payload_too_large,
                             FailoverReason.long_context_tier,
                             FailoverReason.thinking_signature,
+                            FailoverReason.engine_startup_aborted,
                         }
                     )
                 ) and not is_context_length_error
