@@ -475,25 +475,32 @@ def finalize_turn(
             logger.warning("transform_llm_output hook failed: %s", exc)
 
     # Plugin hook: post_llm_call
-    # Fired once per turn after the tool-calling loop completes.
-    # Plugins can use this to persist conversation data (e.g. sync
-    # to an external memory system).
-    if final_response and not interrupted:
-        try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _invoke_hook(
-                "post_llm_call",
-                session_id=agent.session_id,
-                task_id=effective_task_id,
-                turn_id=turn_id,
-                user_message=original_user_message,
-                assistant_response=final_response,
-                conversation_history=list(messages),
-                model=agent.model,
-                platform=getattr(agent, "platform", None) or "",
-            )
-        except Exception as exc:
-            logger.warning("post_llm_call hook failed: %s", exc)
+    # Fired once per turn after the tool-calling loop completes -- always,
+    # even when interrupted or when the turn produced no final text.
+    # pre_llm_call fires unconditionally at turn start; plugins that track
+    # turn lifecycle (e.g. pebble-signal's droplet state) rely on
+    # post_llm_call as the only paired "turn ended" signal. Gating it behind
+    # final_response/interrupted left such a turn with no matching event --
+    # pebble-signal's tracker never cleared the session, so the droplet got
+    # stuck showing "thinking" forever after an interrupted (e.g. /steer'd)
+    # or textless turn. Plugins can still use this to persist conversation
+    # data (e.g. sync to an external memory system); assistant_response may
+    # be None/empty and callers should handle that.
+    try:
+        from hermes_cli.plugins import invoke_hook as _invoke_hook
+        _invoke_hook(
+            "post_llm_call",
+            session_id=agent.session_id,
+            task_id=effective_task_id,
+            turn_id=turn_id,
+            user_message=original_user_message,
+            assistant_response=final_response,
+            conversation_history=list(messages),
+            model=agent.model,
+            platform=getattr(agent, "platform", None) or "",
+        )
+    except Exception as exc:
+        logger.warning("post_llm_call hook failed: %s", exc)
 
     # Extract reasoning from the CURRENT turn only.  Walk backwards
     # but stop at the user message that started this turn — anything
