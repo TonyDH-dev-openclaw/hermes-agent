@@ -114,24 +114,29 @@ def _normalize_route_base_url(base_url: Any) -> str:
 
 
 def _uncensored_mode_persist_disabled(profile_name: str, state_path=None) -> bool:
-    """True if `profile_name` is one of the profiles uncensored-mode
+    """True if `profile_name` is one of the profiles /mode currently has
     switched onto the local uncensored model (see
-    ~/.hermes/plugins/uncensored-mode/state.py's per-profile-keyed backup
-    dict). Reads the plugin's own state file directly rather than
-    importing its Python module -- matches the established cross-plugin
-    state-file-read pattern (local-mode's toggle.py already reads
-    uncensored-mode's state file the same way, and vice versa).
-    Fails safe to False on any read error: privacy suppression must never
-    crash session init, and the failure direction matters -- failing
-    toward "persist normally" only ever risks persisting a session that
-    should have been private (a gap to fix, loudly, if it happens), never
-    the reverse (silently going private for an ordinary session)."""
-    path = state_path or (get_hermes_home() / "uncensored-mode-state.json")
+    ~/.hermes/plugins/mode/state.py's kind-tagged backup dict). Reads the
+    plugin's own state file directly rather than importing its Python
+    module -- matches the established cross-plugin/cross-repo state-file-
+    read-by-path pattern (plugins/default-routing/__init__.py's dispatch
+    gate reads this same file the same way).
+    Fails safe to False on any read error, OR when the active kind isn't
+    "uncensored" (kind == "local" must never suppress persistence --
+    only uncensored carries the "no trace" guarantee): privacy
+    suppression must never crash session init, and the failure direction
+    matters -- failing toward "persist normally" only ever risks
+    persisting a session that should have been private (a gap to fix,
+    loudly, if it happens), never the reverse (silently going private for
+    an ordinary session)."""
+    path = state_path or (get_hermes_home() / "mode-state.json")
     try:
         if not path.exists():
             return False
-        backup = json.loads(path.read_text())
-        return profile_name in backup
+        data = json.loads(path.read_text())
+        if data.get("kind") != "uncensored":
+            return False
+        return profile_name in data.get("backup", {})
     except Exception:
         return False
 
