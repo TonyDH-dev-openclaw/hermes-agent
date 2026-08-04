@@ -5211,7 +5211,11 @@ def complete_task(
             )
         if cur.rowcount != 1:
             return False
+        _declared_artifact_count = 0
         if isinstance(metadata, dict):
+            _raw_declared = metadata.get("artifacts")
+            if isinstance(_raw_declared, (list, tuple)):
+                _declared_artifact_count = len(_raw_declared)
             _persist_scratch_completion_artifacts(conn, task_id, metadata)
             for stored_path in metadata.pop("_staged_artifacts", []):
                 path = Path(stored_path)
@@ -5313,7 +5317,7 @@ def complete_task(
     # Recompute ready status for dependents (separate txn so children see done).
     recompute_ready(conn)
     # Clean up the scratch workspace and any stale tmux session for the worker.
-    _cleanup_workspace(conn, task_id)
+    _cleanup_workspace(conn, task_id, declared_artifact_count=_declared_artifact_count)
     _done_task = get_task(conn, task_id)
     if fire_lifecycle_hook:
         _fire_kanban_lifecycle_hook(
@@ -5610,13 +5614,34 @@ def _is_managed_scratch_path(p: Path) -> bool:
     return is_managed
 
 
-def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
+def _cleanup_workspace(
+    conn: sqlite3.Connection, task_id: str, *, declared_artifact_count: int = 0,
+) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
 
     Called from :func:`complete_task` after the DB transaction commits.
     Best-effort — any error is swallowed so cleanup never blocks task completion.
     Only ``scratch`` workspaces are removed; ``worktree`` and ``dir`` workspaces
     are intentionally preserved.
+
+    ``declared_artifact_count``: how many paths the completing worker
+    declared via ``kanban_complete``'s ``artifacts`` param. When > 0, this
+    is a promise that at least that many files should now exist as durable
+    ``task_attachments`` rows (copied there by
+    :func:`_persist_scratch_completion_artifacts`, which runs earlier in
+    the same :func:`complete_task` call, before the transaction this
+    function's caller commits after). Real live incident (task
+    t_826b6b4b, 2026-08-03): a worker declared a real deliverable,
+    `complete_task` reported success with no error, yet the file was gone
+    the instant the worker read it back and no attachment row was ever
+    created — a race that a clean, isolated `complete_task` call could not
+    reproduce (see `test_complete_task_persists_scratch_artifacts_before_cleanup`,
+    which proves the preservation path itself is correct in isolation).
+    Rather than chase the exact live-only mechanism further, this checks
+    the actual attachment count against the promise before doing anything
+    destructive: if fewer attachments exist than were declared, deleting
+    the workspace would destroy real, undelivered work, so cleanup is
+    skipped (not silently proceeded) and a warning is logged instead.
     """
     try:
         row = conn.execute(
@@ -5650,6 +5675,21 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
                 task_id, path,
             )
             return
+        if declared_artifact_count > 0:
+            (attachment_count,) = conn.execute(
+                "SELECT COUNT(*) FROM task_attachments WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if attachment_count < declared_artifact_count:
+                _log.warning(
+                    "Refusing to remove scratch workspace for task %s: "
+                    "%d artifact(s) were declared on completion but only "
+                    "%d attachment(s) are durably recorded — deleting the "
+                    "workspace now could destroy undelivered work. "
+                    "Workspace left in place at %s for manual recovery.",
+                    task_id, declared_artifact_count, attachment_count, path,
+                )
+                return
         import shutil
         wp = Path(path)
         if wp.is_dir():
