@@ -2109,9 +2109,22 @@ class SlashCommandCompleter(Completer):
                 yield from self._handoff_completions(sub_text, sub_lower)
                 return
 
-            # Static subcommand completions
-            if " " not in sub_text and base_cmd in SUBCOMMANDS and self._command_allowed(base_cmd):
-                for sub in SUBCOMMANDS[base_cmd]:
+            # Static subcommand completions -- built-ins first (CommandDef.subcommands
+            # via the module-level SUBCOMMANDS dict), then plugin-registered commands
+            # (ctx.register_command's subcommands= param, via get_plugin_commands()).
+            if " " not in sub_text and self._command_allowed(base_cmd):
+                subs: tuple[str, ...] = ()
+                if base_cmd in SUBCOMMANDS:
+                    subs = tuple(SUBCOMMANDS[base_cmd])
+                else:
+                    try:
+                        from hermes_cli.plugins import get_plugin_commands
+                        _plugin_cmd = get_plugin_commands().get(base_cmd.lstrip("/"))
+                    except Exception:
+                        _plugin_cmd = None
+                    if _plugin_cmd:
+                        subs = tuple(_plugin_cmd.get("subcommands") or ())
+                for sub in subs:
                     if sub.startswith(sub_lower) and sub != sub_lower:
                         yield Completion(
                             sub,
