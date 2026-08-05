@@ -418,6 +418,21 @@ class TestSlashCommandCompleter:
         texts = {c.text for c in completions}
         assert "install" in texts
 
+    def test_plugin_command_lookup_exception_is_swallowed(self, monkeypatch):
+        """A broken get_plugin_commands() must not crash completion -- matches
+        the exception-safety pattern already used for the skill-provider path
+        (test_skill_provider_exception_is_swallowed) and the plugin-name
+        completion branch (commands.py ~2149-2161)."""
+        from hermes_cli import plugins as _plugins_mod
+        def _boom():
+            raise RuntimeError("plugin system down")
+        monkeypatch.setattr(_plugins_mod, "get_plugin_commands", _boom)
+        completer = SlashCommandCompleter()
+
+        completions = _completions(completer, "/mode ")
+
+        assert completions == []
+
 
 
 
