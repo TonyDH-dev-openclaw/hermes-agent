@@ -236,6 +236,12 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
     argumentMode: 'options'
   },
   {
+    name: '/mode',
+    description: 'Switch model mode: cloud|local [model]|uncensored [model]|status',
+    surface: exec(),
+    argumentMode: 'options'
+  },
+  {
     name: '/agents',
     description: 'Show active desktop sessions and running tasks',
     aliases: ['/tasks'],
