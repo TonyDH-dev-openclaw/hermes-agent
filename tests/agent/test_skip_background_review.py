@@ -111,6 +111,34 @@ def test_finalize_turn_fires_review_when_flag_unset() -> None:
     agent._spawn_background_review.assert_called_once()
 
 
+def test_finalize_turn_skips_review_when_persist_disabled() -> None:
+    """finalize_turn must NOT call _spawn_background_review when
+    agent._persist_disabled is True (uncensored mode's no-trace guarantee).
+
+    _should_review_memory only checks "memory" in valid_tool_names, which
+    stays true while uncensored (memory_guard.py blocks the call, not the
+    tool's listing) -- without this gate the review fork would still spawn
+    and send the full conversation to an LLM call (the review model,
+    possibly a configured cloud model), even though the eventual memory
+    write gets blocked downstream. Exercises the real finalizer path, not
+    a duplicated guard expression.
+    """
+    agent = _make_agent(skip_background_review=False)
+    _stub_agent_for_finalize(agent)
+    agent._persist_disabled = True
+    _run_finalize(agent)
+    agent._spawn_background_review.assert_not_called()
+
+
+def test_finalize_turn_fires_review_when_persist_not_disabled() -> None:
+    """Counterpart: with persistence enabled, finalize_turn DOES review."""
+    agent = _make_agent(skip_background_review=False)
+    _stub_agent_for_finalize(agent)
+    agent._persist_disabled = False
+    _run_finalize(agent)
+    agent._spawn_background_review.assert_called_once()
+
+
 def test_cron_construction_sets_skip_background_review() -> None:
     """The cron scheduler MUST construct AIAgent with skip_background_review=True.
 

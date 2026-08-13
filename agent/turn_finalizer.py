@@ -232,6 +232,51 @@ def finalize_turn(
         if callable(_rollback_fn):
             _rollback_fn(_preflight_snapshot)
 
+    _response_transformed = False
+    _pre_transform_response = None
+
+    # Plugin hook: transform_llm_output
+    # Fired once per turn after the tool-calling loop completes, and
+    # deliberately BEFORE trajectory save / session persistence below:
+    # `_session_db.append_message` is a pure insert with no update path, so
+    # a plugin swap applied after the one-and-only persist call for this
+    # turn cannot be written back into the same row without creating a
+    # duplicate. Running the hook here means `final_response` is already
+    # the (possibly swapped) text by the time the tail-reconciliation logic
+    # below fills/appends `messages[-1]`, so the durable transcript, the
+    # trajectory log, and the returned result all agree. Plugins can
+    # transform the LLM's output text before it's returned. First hook to
+    # return a string wins; None/empty return leaves text unchanged.
+    #
+    # Re-derived here a fifth time -- see docs/patches/ and the
+    # reconcile-local-fixes.sh local-fixes branch for the prior attempts.
+    # Each was independently discarded either by a `hermes update`
+    # fast-forward falling back to `git reset --hard origin/main` (only
+    # spares a separate branch's own commits, never main's), or -- as
+    # happened here, live, within the same session that wrote the fourth
+    # re-derivation -- by upstream drift moving fast enough that even the
+    # disaster-recovery patch's fuzzy-fingerprint fallback couldn't match.
+    # If this keeps recurring, the fix needs to land upstream directly
+    # rather than staying a locally-reapplied patch.
+    if final_response and not interrupted:
+        try:
+            from hermes_cli.lifecycle import invoke_hook as _invoke_hook
+            _transform_results = _invoke_hook(
+                "transform_llm_output",
+                response_text=final_response,
+                session_id=agent.session_id or "",
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+            )
+            for _hook_result in _transform_results:
+                if isinstance(_hook_result, str) and _hook_result:
+                    _pre_transform_response = final_response
+                    final_response = _hook_result
+                    _response_transformed = True
+                    break  # First non-empty string wins
+        except Exception as exc:
+            logger.warning("transform_llm_output hook failed: %s", exc)
+
     # Post-loop cleanup must never lose the response.  Trajectory save,
     # resource teardown, and session persistence all touch fallible
     # surfaces — file I/O / JSON serialization (_save_trajectory), remote
@@ -345,6 +390,27 @@ def finalize_turn(
                 # assumption that no live dict loses the marker in place —
                 # this pop is the one place that does. Invalidate it so the
                 # filled row is re-examined instead of skipped.
+                agent._db_flush_scan_prefix = None
+            elif (
+                _response_transformed
+                and isinstance(_tail, dict)
+                and _tail.get("content") != final_response
+            ):
+                # A plain (non-tool-call) turn already appended its own
+                # assistant row to `messages` back in conversation_loop.py
+                # before finalize_turn ever ran (`messages.append(final_msg)`
+                # at the loop's text_response exit) -- that row satisfies
+                # both the role check above (tail IS assistant) and
+                # `_is_pure_tool_call_tail` (no tool_calls, so it's False),
+                # so neither branch above touches it. But
+                # transform_llm_output (above) swapped `final_response`
+                # AFTER that row was appended with the pre-swap text.
+                # Overwrite its content in place, with the same
+                # marker-pop/cursor-invalidate treatment as the pure-tool-
+                # call-tail fill above, so the row this turn persists for
+                # the first time carries the swapped text.
+                _tail["content"] = final_response
+                _tail.pop("_db_persisted", None)
                 agent._db_flush_scan_prefix = None
 
         # The model has completed its request, so replace API-local
@@ -548,32 +614,6 @@ def finalize_turn(
         except Exception as _exp_err:
             logger.debug("turn-completion explainer failed: %s", _exp_err)
 
-    _response_transformed = False
-    _pre_transform_response = None
-
-    # Plugin hook: transform_llm_output
-    # Fired once per turn after the tool-calling loop completes.
-    # Plugins can transform the LLM's output text before it's returned.
-    # First hook to return a string wins; None/empty return leaves text unchanged.
-    if final_response and not interrupted:
-        try:
-            from hermes_cli.lifecycle import invoke_hook as _invoke_hook
-            _transform_results = _invoke_hook(
-                "transform_llm_output",
-                response_text=final_response,
-                session_id=agent.session_id or "",
-                model=agent.model,
-                platform=getattr(agent, "platform", None) or "",
-            )
-            for _hook_result in _transform_results:
-                if isinstance(_hook_result, str) and _hook_result:
-                    _pre_transform_response = final_response
-                    final_response = _hook_result
-                    _response_transformed = True
-                    break  # First non-empty string wins
-        except Exception as exc:
-            logger.warning("transform_llm_output hook failed: %s", exc)
-
     # Plugin hook: post_llm_call
     # Fired once per turn after the tool-calling loop completes -- always,
     # even when interrupted or when the turn produced no final text.
@@ -757,10 +797,24 @@ def finalize_turn(
     # Suppressed when skip_background_review=True (e.g. cron) — review forks
     # spawn another AIAgent (~30K tokens / event) and cron sessions have no
     # human-in-the-loop benefit from the review.
+    #
+    # Also suppressed whenever persistence is disabled (uncensored mode's
+    # no-trace guarantee). _should_review_memory only checks that "memory"
+    # is in agent.valid_tool_names -- that stays true while uncensored (the
+    # tool is still listed, just blocked at call time by memory_guard.py's
+    # pre_tool_call hook), so without this the review fork would still spawn
+    # and send the full conversation to whatever model backs the review
+    # (_resolve_review_runtime defaults to the parent's own model, but
+    # auxiliary.background_review can route it to a different one -- a
+    # cloud model, if ever configured for review quality). The eventual
+    # memory write is still blocked by the same hook either way, but the
+    # conversation content reaching an LLM call at all is exactly what "no
+    # trace" promises never happens.
     if (
         final_response
         and not interrupted
         and not getattr(agent, "skip_background_review", False)
+        and not getattr(agent, "_persist_disabled", False)
         and (_should_review_memory or _should_review_skills)
     ):
         try:
