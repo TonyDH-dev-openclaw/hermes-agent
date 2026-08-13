@@ -46,11 +46,22 @@ def test_returns_false_when_kind_is_local_even_if_profile_is_in_backup(tmp_path)
     assert _uncensored_mode_persist_disabled("default", state_path=state_path) is False
 
 
-def test_fails_safe_to_false_on_malformed_state_file(tmp_path):
+def test_fails_safe_to_true_on_malformed_state_file(tmp_path):
     # A malformed/partially-written state file must never crash session
-    # init, and must never accidentally suppress persistence for a
-    # legitimate session -- fail toward "persist normally", not toward
-    # "silently go private".
+    # init. Unlike a missing file (a definite "not uncensored" answer),
+    # an EXISTING-but-unreadable file means /mode switched something and
+    # we can't tell what it was -- privacy-first: fail toward suppressing
+    # persistence, not toward silently persisting a session that should
+    # have been private.
     state_path = tmp_path / "mode-state.json"
     state_path.write_text("not valid json{{{")
-    assert _uncensored_mode_persist_disabled("default", state_path=state_path) is False
+    assert _uncensored_mode_persist_disabled("default", state_path=state_path) is True
+
+
+def test_returns_false_when_state_file_genuinely_missing_not_just_unreadable(tmp_path):
+    # A missing file is unambiguous ("nothing has switched"), unlike a
+    # present-but-corrupt one -- must stay False, not get swept up in the
+    # corrupt-file fail-closed behavior above.
+    assert _uncensored_mode_persist_disabled(
+        "default", state_path=tmp_path / "does-not-exist.json",
+    ) is False

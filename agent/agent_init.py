@@ -121,24 +121,33 @@ def _uncensored_mode_persist_disabled(profile_name: str, state_path=None) -> boo
     module -- matches the established cross-plugin/cross-repo state-file-
     read-by-path pattern (plugins/default-routing/__init__.py's dispatch
     gate reads this same file the same way).
-    Fails safe to False on any read error, OR when the active kind isn't
-    "uncensored" (kind == "local" must never suppress persistence --
-    only uncensored carries the "no trace" guarantee): privacy
-    suppression must never crash session init, and the failure direction
-    matters -- failing toward "persist normally" only ever risks
-    persisting a session that should have been private (a gap to fix,
-    loudly, if it happens), never the reverse (silently going private for
-    an ordinary session)."""
+
+    A missing state file (kind == "local", or no file at all) always
+    returns False -- that's not ambiguous, it's a definite "not uncensored"
+    answer, so persisting normally is correct, not a fallback.
+
+    An EXISTING-but-unreadable state file (corrupt JSON, permission error)
+    is a genuinely different situation: the file being there at all means
+    /mode has switched something, and a read failure means we simply can't
+    tell what. Privacy-first: return True (suppress persistence) rather
+    than the reverse. This is a deliberate reversal of an earlier version
+    of this function that failed the other way (persist normally on read
+    error) -- reasoned at the time that a wrongly-suppressed ordinary
+    session was the worse outcome, but Tony's "no trace... anything that
+    can leave trace" is an explicit hard privacy guarantee, and a silent
+    leak the user never learns happened is worse than an ordinary session
+    losing its history under a rare, self-correcting failure (fix the
+    file, the very next session persists again)."""
     path = state_path or (get_hermes_home() / "mode-state.json")
+    if not path.exists():
+        return False
     try:
-        if not path.exists():
-            return False
         data = json.loads(path.read_text())
         if data.get("kind") != "uncensored":
             return False
         return profile_name in data.get("backup", {})
     except Exception:
-        return False
+        return True
 
 
 def _provider_default_routes(provider: str) -> set[str]:
