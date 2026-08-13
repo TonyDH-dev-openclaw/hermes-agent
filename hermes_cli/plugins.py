@@ -1797,6 +1797,7 @@ class PluginContext:
         handler: Callable,
         description: str = "",
         args_hint: str = "",
+        subcommands: tuple[str, ...] = (),
     ) -> Optional[PluginRegistration]:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
@@ -1813,6 +1814,13 @@ class PluginContext:
         command picker. Plugin commands without ``args_hint`` register as
         parameterless in Discord and still accept trailing text when invoked
         as free-form chat.
+
+        ``subcommands`` is an optional tuple of literal first-argument values
+        (e.g. ``("on", "off", "status")``) that CLI/TUI/desktop completers
+        offer as a dropdown after the command name -- mirrors the built-in
+        ``CommandDef.subcommands`` field (``hermes_cli/commands.py``). Empty
+        by default: no dropdown, matching every plugin command's behavior
+        before this field existed.
 
         Names conflicting with built-in commands are rejected with a warning.
         """
@@ -1844,6 +1852,7 @@ class PluginContext:
             "plugin": self.manifest.name,
             "plugin_key": self.manifest.key or self.manifest.name,
             "args_hint": (args_hint or "").strip(),
+            "subcommands": tuple(subcommands or ()),
         }
         self._manager._plugin_commands[clean] = entry
         handle = self._track_replacement(
