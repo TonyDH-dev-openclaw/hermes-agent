@@ -177,6 +177,12 @@ declare global {
       watchDirectory?: (dir: string) => Promise<HermesPreviewWatch>
       stopPreviewFileWatch: (id: string) => Promise<boolean>
       setActiveWork?: (payload: HermesActiveWork) => void
+      /** True while this renderer has at least one composer waiting on a
+       *  slash/@ completion RPC. Separate from setActiveWork on purpose: a
+       *  pending completion must unthrottle painting the same way a live
+       *  turn does (see stream-throttle.ts), but must NOT count as unsaved
+       *  work for the quit-confirmation dialog the way a live turn does. */
+      setCompletionPending?: (pending: boolean) => void
       setTitleBarTheme?: (payload: HermesTitleBarTheme) => void
       setNativeTheme?: (mode: 'dark' | 'light' | 'system') => void
       setTranslucency?: (payload: { intensity: number }) => void
