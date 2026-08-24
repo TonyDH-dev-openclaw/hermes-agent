@@ -1635,6 +1635,9 @@ DEFAULT_CONFIG = {
         "thinking_sound": True,       # Calm ambient bubble sound while the agent works in voice chat (volume follows beep_volume)
         "silence_threshold": 200,     # RMS below this = silence (0-32767)
         "silence_duration": 3.0,      # Seconds of silence before auto-stop
+        "vad_enabled": False,         # Silero VAD fast-path: end the turn sooner than silence_duration when VAD is confident this is silence (never later; strict no-op when False)
+        "vad_confidence_threshold": 0.15,  # VAD probability below this = confident silence (0.0-1.0)
+        "vad_fast_silence_duration": 0.6,  # Seconds of confident silence before auto-stop (only used when vad_enabled)
         "barge_in": True,             # Interrupt the agent / stop TTS when the user starts talking
         "barge_in_grace_seconds": 0.5,  # Trip suppression right after TTS playback starts (onset transient); the mic itself is live for the whole turn
         "barge_in_threshold_multiplier": 3.0,  # Speech trigger = quiet-room floor x this (floor is calibrated BEFORE playback, never against speaker bleed)

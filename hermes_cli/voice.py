@@ -427,6 +427,10 @@ def start_continuous(
     auto_restart: bool = True,
     max_recording_seconds: float = 0.0,
     on_stop_phrase: Optional[Callable[[str], None]] = None,
+    no_speech_limit: int = _CONTINUOUS_NO_SPEECH_LIMIT,
+    vad_enabled: bool = False,
+    vad_confidence_threshold: float = 0.15,
+    vad_fast_silence_duration: float = 0.6,
 ) -> bool:
     """Start a VAD-driven continuous recording loop.
 
@@ -481,6 +485,9 @@ def start_continuous(
 
         _continuous_recorder._silence_threshold = silence_threshold
         _continuous_recorder._silence_duration = silence_duration
+        _continuous_recorder._vad_enabled = vad_enabled
+        _continuous_recorder._vad_confidence_threshold = vad_confidence_threshold
+        _continuous_recorder._vad_fast_silence_duration = vad_fast_silence_duration
         # Same numeric-with-bool-excluded guard as the CLI wiring in
         # cli.py:_voice_start_recording — <= 0 (or garbage) disables the cap.
         _continuous_recorder._max_recording_seconds = (

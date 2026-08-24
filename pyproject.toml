@@ -198,6 +198,10 @@ voice = [
   "faster-whisper==1.2.1",
   "sounddevice==0.5.5",
   "numpy==2.4.3",
+  # VAD fast-path silence detection (tools/vad_lite.py) -- an AudioRecorder
+  # feature, not a wake-word feature; also listed under [wake] since a
+  # wake+voice install (the common case) already needs both.
+  "silero-vad-lite==0.2.1",
 ]
 # "Hey Hermes" wake word — on-device hotword detection. All engines are
 # optional; openWakeWord (ONNX) is the free default, sherpa-onnx adds
@@ -209,6 +213,7 @@ wake = [
   "openwakeword==0.6.0",
   "onnxruntime==1.27.0",
   "sherpa-onnx==1.13.4",
+  "silero-vad-lite==0.2.1",
   "sentencepiece==0.2.2",
   "pvporcupine==4.0.3",
   "sounddevice==0.5.5",

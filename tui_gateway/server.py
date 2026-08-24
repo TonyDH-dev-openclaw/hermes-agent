@@ -14082,6 +14082,50 @@ def _(rid, params: dict) -> dict:
                 if isinstance(max_rec, (int, float)) and not isinstance(max_rec, bool)
                 else 120.0
             )
+            # voice.no_speech_limit -- consecutive silent cycles before the
+            # whole conversation gives up (not the same as silence_duration,
+            # which only ends ONE recording's silence window). Same guard
+            # shape as the other voice_cfg numeric reads above: non-positive/
+            # non-numeric/bool falls back to the documented default of 3
+            # (matching hermes_cli.voice._CONTINUOUS_NO_SPEECH_LIMIT --
+            # hardcoded here rather than imported, since tests substitute a
+            # bare fake hermes_cli.voice module lacking that attribute).
+            no_speech_limit = voice_cfg.get("no_speech_limit")
+            safe_no_speech_limit = (
+                no_speech_limit
+                if isinstance(no_speech_limit, int)
+                and not isinstance(no_speech_limit, bool)
+                and no_speech_limit > 0
+                else 3
+            )
+            # voice.vad_enabled / vad_confidence_threshold / vad_fast_silence_duration
+            # -- fast-path silence detection (tools/vad_lite.py). Same guard
+            # shape as the other voice_cfg reads: non-numeric/bool/missing
+            # falls back to safe defaults matching AudioRecorder's own
+            # __init__ defaults, so an unconfigured voice_cfg behaves
+            # identically to before this feature existed (vad_enabled
+            # defaults to False here deliberately, even though the spec
+            # calls for defaulting it True once shipped -- flip this
+            # default only after a live listening check confirms the fast
+            # path behaves well on this hardware).
+            vad_enabled = voice_cfg.get("vad_enabled")
+            safe_vad_enabled = bool(vad_enabled) if isinstance(vad_enabled, bool) else False
+
+            vad_conf = voice_cfg.get("vad_confidence_threshold")
+            safe_vad_conf = (
+                vad_conf
+                if isinstance(vad_conf, (int, float)) and not isinstance(vad_conf, bool)
+                and 0.0 <= vad_conf <= 1.0
+                else 0.15
+            )
+
+            vad_fast = voice_cfg.get("vad_fast_silence_duration")
+            safe_vad_fast = (
+                vad_fast
+                if isinstance(vad_fast, (int, float)) and not isinstance(vad_fast, bool)
+                and vad_fast > 0
+                else 0.6
+            )
             started = start_continuous(
                 on_transcript=_on_transcript,
                 on_status=_on_status,
@@ -14091,6 +14135,10 @@ def _(rid, params: dict) -> dict:
                 auto_restart=False,
                 max_recording_seconds=safe_max_rec,
                 on_stop_phrase=_on_stop_phrase,
+                no_speech_limit=safe_no_speech_limit,
+                vad_enabled=safe_vad_enabled,
+                vad_confidence_threshold=safe_vad_conf,
+                vad_fast_silence_duration=safe_vad_fast,
             )
             if started is False:
                 _resume_voice_wake()
