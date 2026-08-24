@@ -121,6 +121,17 @@ def _default_input_samplerate(sd) -> int:
 from hermes_constants import is_termux as _is_termux_environment
 
 
+def vad_speech_probability(model, chunk_int16):
+    """Thin proxy to tools.vad_lite.speech_probability, importing lazily so
+    tools.vad_lite's numpy import never runs at tools.voice_mode import
+    time (this module is documented above as never importing audio libs at
+    module scope, to avoid crashing headless environments). Kept as a
+    module-level name -- not inlined at each call site -- so tests can
+    still `patch("tools.voice_mode.vad_speech_probability", ...)`."""
+    from tools.vad_lite import speech_probability
+    return speech_probability(model, chunk_int16)
+
+
 def _voice_capture_install_hint() -> str:
     if _is_termux_environment():
         return "pkg install python-numpy portaudio && python -m pip install sounddevice"
@@ -846,6 +857,17 @@ class AudioRecorder:
         self._on_silence_stop = None
         self._silence_threshold: int = SILENCE_RMS_THRESHOLD
         self._silence_duration: float = SILENCE_DURATION_SECONDS
+        # VAD fast-path silence detection (tools/vad_lite.py). Disabled by
+        # default until config wiring (tui_gateway/server.py) turns it on;
+        # _vad_model is lazily loaded on first real use, never at __init__.
+        self._vad_enabled: bool = False
+        self._vad_confidence_threshold: float = 0.15
+        self._vad_fast_silence_duration: float = 0.6
+        self._vad_model = None
+        # Latches True after a failed model load so subsequent chunks don't
+        # retry the ~60ms load on every callback for the rest of the
+        # recording (see _vad_probability_for_chunk).
+        self._vad_load_failed: bool = False
         self._max_wait: float = 15.0  # Max seconds to wait for speech before auto-stop
         # Hard cap on total recording length, wired from voice.max_recording_seconds
         # by the CLI before each recording. 0 (or unset) = no cap (previous behaviour).
@@ -865,6 +887,85 @@ class AudioRecorder:
         """
         cap = self._max_recording_seconds
         return bool(cap and cap > 0 and elapsed >= cap)
+
+    def _vad_probability_for_chunk(self, chunk) -> float:
+        """Lazily loads the VAD model on first real use (never at __init__,
+        so recorders created with vad_enabled=False -- the default until
+        this feature is wired up config-side -- pay zero import/model-load
+        cost), always at tools.vad_lite.VAD_SAMPLE_RATE regardless of
+        self._sample_rate -- silero-vad-lite only supports 8000/16000 and
+        AudioRecorder records at the input device's native rate (commonly
+        44100, not 16000), so chunks are resampled to match before being
+        scored. A load failure (e.g. missing ONNX runtime, or an unusable
+        rate) fails open to probability=1.0 ("assume speech"), matching
+        speech_probability's own fail-open contract for per-chunk errors --
+        otherwise it would raise uncaught inside the sounddevice audio
+        callback thread. The failure latches (_vad_load_failed) so a
+        recording that can't load VAD doesn't retry the ~60ms load on every
+        subsequent chunk."""
+        if self._vad_load_failed:
+            return 1.0
+        from tools.vad_lite import VAD_SAMPLE_RATE
+        if self._vad_model is None:
+            try:
+                from tools.vad_lite import load_vad_model
+                self._vad_model = load_vad_model(VAD_SAMPLE_RATE)
+            except Exception:
+                self._vad_load_failed = True
+                logger.warning(
+                    "VAD model failed to load; disabling VAD fast-path for "
+                    "this recording (falling back to RMS-only silence detection)",
+                    exc_info=True,
+                )
+                return 1.0
+        from tools.vad_lite import resample_for_vad
+        resampled = resample_for_vad(chunk.flatten(), self._sample_rate, VAD_SAMPLE_RATE)
+        return vad_speech_probability(self._vad_model, resampled)
+
+    def _resume_speech_confirmed(self, chunk) -> bool:
+        """Decides whether a sustained (>= min_speech_duration) stretch of
+        audio above self._silence_threshold, after self._has_spoken, is
+        genuinely resumed speech that should reset the silence timer -- or
+        sustained non-speech noise (music, TV, a piano) that should not.
+
+        Pure RMS + duration cannot tell "the user kept talking" apart from
+        "something loud that isn't speech kept happening" -- both look
+        identical to an RMS meter once they last longer than the brief-blip
+        tolerance. VAD can. Disabled (or uncertain) fails toward True
+        ("assume speech"), matching this module's fail-open convention
+        elsewhere -- ambiguous audio must never get a real conversation cut
+        off early."""
+        if not self._vad_enabled:
+            return True
+        return self._vad_probability_for_chunk(chunk) >= self._vad_confidence_threshold
+
+    def _silence_callback_check(self, chunk, now: float) -> bool:
+        """Decides whether a silence-triggered stop should fire, given the
+        caller has already confirmed rms <= self._silence_threshold and
+        self._has_spoken is True. Returns True exactly when should_fire.
+
+        VAD fast path: when vad_enabled and the model is confident this
+        chunk is silence (probability below vad_confidence_threshold), a
+        SHORTER window (vad_fast_silence_duration) applies instead of the
+        full silence_duration. When VAD is uncertain, or disabled, or
+        fails (fails open to probability=1.0 -- "assume speech"),
+        silence_duration applies unchanged -- the fast path can only make
+        this fire SOONER than before, never later.
+        """
+        if self._silence_start == 0.0:
+            self._silence_start = now
+            return False
+
+        required_duration = self._silence_duration
+        if self._vad_enabled:
+            probability = self._vad_probability_for_chunk(chunk)
+            if probability < self._vad_confidence_threshold:
+                required_duration = min(required_duration, self._vad_fast_silence_duration)
+
+        if now - self._silence_start >= required_duration:
+            logger.info("Silence detected (%.2fs), auto-stopping", required_duration)
+            return True
+        return False
 
     # -- public properties ---------------------------------------------------
 
@@ -940,7 +1041,8 @@ class AudioRecorder:
                         if self._resume_start == 0.0:
                             self._resume_start = now
                         elif now - self._resume_start >= self._min_speech_duration:
-                            self._silence_start = 0.0
+                            if self._resume_speech_confirmed(indata):
+                                self._silence_start = 0.0
                             self._resume_start = 0.0
                 elif self._has_spoken:
                     # Below threshold after speech confirmed.
@@ -970,13 +1072,7 @@ class AudioRecorder:
                 # 2. No speech detected at all for max_wait seconds
                 should_fire = False
                 if self._has_spoken and rms <= self._silence_threshold:
-                    # User was speaking and now is silent
-                    if self._silence_start == 0.0:
-                        self._silence_start = now
-                    elif now - self._silence_start >= self._silence_duration:
-                        logger.info("Silence detected (%.1fs), auto-stopping",
-                                    self._silence_duration)
-                        should_fire = True
+                    should_fire = self._silence_callback_check(indata, now)
                 elif not self._has_spoken and elapsed >= self._max_wait:
                     logger.info("No speech within %.0fs, auto-stopping",
                                 self._max_wait)
