@@ -453,6 +453,35 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             f"not on any model name returned by the API."
         )
 
+    # Tony, 2026-08-24: "the agent does not know what model is it running
+    # on. jarvis can run on cloud, qwen3.5 9b or uncensored version. it
+    # just says qwen when on uncensored mode." Same underlying gap as the
+    # Alibaba case above (the agent otherwise has no real signal for this
+    # and just guesses from base-model training association), just for a
+    # different provider: /mode local|uncensored (~/.hermes/plugins/mode)
+    # both point the `default` profile at lmstudio-chat, swapping only
+    # agent.model between the plain local build and the uncensored
+    # fine-tune -- with nothing telling the agent which one it currently
+    # is, "uncensored" and "local" were indistinguishable from the
+    # inside. Checking the model ID for "uncensored" is a simple, robust
+    # signal here since both DEFAULT_MODEL_BY_KIND entries in
+    # mode/state.py reliably differ on exactly that substring.
+    elif agent.provider == "lmstudio-chat":
+        _is_uncensored_model = "uncensored" in agent.model.lower()
+        stable_parts.append(
+            f"You are running locally via LM Studio, not in the cloud. "
+            f"The exact model ID is {agent.model}. "
+            + (
+                "This is the uncensored fine-tune, switched to via /mode uncensored -- "
+                "when asked what model or mode you're in, say so explicitly rather than "
+                "just naming the base model."
+                if _is_uncensored_model
+                else "This is the standard local build, switched to via /mode local -- "
+                "when asked what model or mode you're in, say so explicitly rather than "
+                "assuming you're in the cloud."
+            )
+        )
+
     # Environment hints (WSL, Termux, etc.) — tell the agent about the
     # execution environment so it can translate paths and adapt behavior.
     # Stable for the lifetime of the process.
