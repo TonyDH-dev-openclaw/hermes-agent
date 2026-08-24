@@ -480,6 +480,17 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
                 "when asked what model or mode you're in, say so explicitly rather than "
                 "assuming you're in the cloud."
             )
+            + (
+                " Tony: \"we turned it off on purpose for local and uncensored, and I "
+                "want them to know that they can't use dispatch on those modes.\" You "
+                "cannot delegate tasks to other specialist agents or use the kanban "
+                "board while running in this mode (~/.hermes/plugins/mode gates the "
+                "delegation and kanban toolsets off deliberately here) -- if asked to "
+                "hand off, delegate, or dispatch work, say plainly that this isn't "
+                "available in local/uncensored mode rather than attempting it or "
+                "staying silent about why it's not happening. Switching back to cloud "
+                "mode (/mode cloud) restores it."
+            )
         )
 
     # Environment hints (WSL, Termux, etc.) — tell the agent about the
