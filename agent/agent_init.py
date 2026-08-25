@@ -176,10 +176,19 @@ def _reconcile_uncensored_session_tracking(session_id: str, state_path=None) -> 
     ~/.hermes/plugins/mode/toggle.py's _restore_backup, which does not
     pass through session init at all.
 
-    Deliberately silent on any failure (missing/corrupt state file, DB
-    error) -- this is best-effort bookkeeping layered on top of the
-    already-decided _uncensored_mode_persist_disabled() check; it must
-    never block or crash session init.
+    Read/write failures on the state file itself are silent (missing/
+    corrupt file, no filesystem access) -- there's no session identity to
+    act on in that case, so this is a genuine no-op, not a swallowed
+    privacy failure. A *delete_session* failure is a different matter and
+    is NOT silent: security review on the first version of this function
+    flagged it as fail-open (control regression) -- a failed delete still
+    advanced uncensored_session_id to the new session, permanently losing
+    track of the undeleted "private" one with no record it ever failed.
+    Fixed with retries (transient DB-lock errors are the realistic failure
+    mode) plus a persisted `uncensored_pending_cleanup` list so a session
+    that still couldn't be deleted after retries gets another real attempt
+    on every later reconcile call, and an ERROR-level log (not swallowed at
+    WARNING) so a permanently-stuck one is at least diagnosable.
     """
     path = state_path or (get_hermes_home() / "mode-state.json")
     try:
@@ -188,22 +197,50 @@ def _reconcile_uncensored_session_tracking(session_id: str, state_path=None) -> 
         return
     if data.get("kind") != "uncensored":
         return
+
+    pending = list(data.get("uncensored_pending_cleanup") or [])
     tracked = data.get("uncensored_session_id")
-    if tracked == session_id:
-        return  # same session continuing (e.g. a compression rebuild) -- nothing abandoned
-    if tracked:
-        try:
-            from hermes_state import SessionDB
-            SessionDB().delete_session(tracked)
-        except Exception:
-            logger.warning(
-                "failed to delete abandoned uncensored session %s", tracked, exc_info=True
-            )
-    data["uncensored_session_id"] = session_id
+    if tracked and tracked != session_id and tracked not in pending:
+        pending.append(tracked)
+
+    still_pending = []
+    for sid in pending:
+        if not _delete_session_with_retries(sid):
+            still_pending.append(sid)
+    data["uncensored_pending_cleanup"] = still_pending
+
+    if tracked != session_id:
+        data["uncensored_session_id"] = session_id
     try:
         path.write_text(json.dumps(data, indent=2))
     except Exception:
         pass
+
+
+def _delete_session_with_retries(session_id: str, attempts: int = 3, delay: float = 0.5) -> bool:
+    """Best-effort delete with retries -- a locked SQLite database (another
+    session/turn writing concurrently) is the realistic transient failure
+    here, not a permanent one. Returns True once actually deleted (or
+    already gone); False only after every attempt failed, so the caller
+    can keep it queued for a later retry instead of silently forgetting
+    it -- see _reconcile_uncensored_session_tracking's docstring."""
+    import time as _time
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            from hermes_state import SessionDB
+            SessionDB().delete_session(session_id)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                _time.sleep(delay)
+    logger.error(
+        "failed to delete abandoned uncensored session %s after %d attempts "
+        "-- queued for retry on next session init (uncensored_pending_cleanup)",
+        session_id, attempts, exc_info=last_exc,
+    )
+    return False
 
 
 def _provider_default_routes(provider: str) -> set[str]:

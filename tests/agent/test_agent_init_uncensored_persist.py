@@ -1,5 +1,11 @@
 import json
-from agent.agent_init import _uncensored_mode_persist_disabled
+from unittest.mock import patch
+
+from agent.agent_init import (
+    _uncensored_mode_persist_disabled,
+    _reconcile_uncensored_session_tracking,
+    _delete_session_with_retries,
+)
 
 
 def test_returns_false_when_state_file_missing(tmp_path):
@@ -65,3 +71,115 @@ def test_returns_false_when_state_file_genuinely_missing_not_just_unreadable(tmp
     assert _uncensored_mode_persist_disabled(
         "default", state_path=tmp_path / "does-not-exist.json",
     ) is False
+
+
+# --- _reconcile_uncensored_session_tracking / _delete_session_with_retries ---
+#
+# Tony, 2026-08-24: "I want to see all the conversation we had [during the
+# uncensored session]. but after I go to a different session or make a new
+# one or change mode, it will erase everything including the one in
+# desktop app session history." Uncensored mode now persists normally
+# (agent_init.py no longer sets _persist_disabled for it) so Desktop's
+# live chat view actually works; this is the "erase on abandonment" half.
+#
+# The retry/pending_cleanup logic below was added after an automated
+# security review of the first version flagged it as fail-open: a failed
+# delete_session() call used to silently advance uncensored_session_id to
+# the new session anyway, permanently losing track of the undeleted
+# "private" one with no record it had ever failed.
+
+def _write_state(state_path, **overrides):
+    payload = {"kind": "uncensored", "model": "x", "backup": {"default": {"model": "y", "provider": "z"}}}
+    payload.update(overrides)
+    state_path.write_text(json.dumps(payload))
+
+
+def test_first_uncensored_session_just_records_itself_no_delete(tmp_path):
+    state_path = tmp_path / "mode-state.json"
+    _write_state(state_path)  # no uncensored_session_id yet
+    with patch("hermes_state.SessionDB") as m_db:
+        _reconcile_uncensored_session_tracking("s_new", state_path=state_path)
+    m_db.return_value.delete_session.assert_not_called()
+    assert json.loads(state_path.read_text())["uncensored_session_id"] == "s_new"
+
+
+def test_new_session_id_deletes_the_previously_tracked_one(tmp_path):
+    state_path = tmp_path / "mode-state.json"
+    _write_state(state_path, uncensored_session_id="s_old")
+    with patch("hermes_state.SessionDB") as m_db:
+        _reconcile_uncensored_session_tracking("s_new", state_path=state_path)
+    m_db.return_value.delete_session.assert_called_once_with("s_old")
+    data = json.loads(state_path.read_text())
+    assert data["uncensored_session_id"] == "s_new"
+    assert data["uncensored_pending_cleanup"] == []
+
+
+def test_same_session_id_continuing_does_not_delete_itself(tmp_path):
+    # A compression rebuild re-runs session init with the SAME session_id --
+    # must not treat that as abandonment and delete the live session.
+    state_path = tmp_path / "mode-state.json"
+    _write_state(state_path, uncensored_session_id="s_current")
+    with patch("hermes_state.SessionDB") as m_db:
+        _reconcile_uncensored_session_tracking("s_current", state_path=state_path)
+    m_db.return_value.delete_session.assert_not_called()
+    assert json.loads(state_path.read_text())["uncensored_session_id"] == "s_current"
+
+
+def test_not_uncensored_mode_does_nothing(tmp_path):
+    state_path = tmp_path / "mode-state.json"
+    _write_state(state_path, kind="local", uncensored_session_id="s_old")
+    with patch("hermes_state.SessionDB") as m_db:
+        _reconcile_uncensored_session_tracking("s_new", state_path=state_path)
+    m_db.return_value.delete_session.assert_not_called()
+    # State file must be left untouched -- this function has no business
+    # editing local-mode's state.
+    assert json.loads(state_path.read_text())["uncensored_session_id"] == "s_old"
+
+
+def test_missing_state_file_is_a_silent_no_op(tmp_path):
+    _reconcile_uncensored_session_tracking("s_new", state_path=tmp_path / "does-not-exist.json")
+    # No exception is the assertion here.
+
+
+def test_delete_session_with_retries_succeeds_after_transient_failures():
+    # Transient DB-lock-style errors are the realistic failure mode --
+    # must retry rather than giving up on the first exception.
+    with patch("hermes_state.SessionDB") as m_db:
+        m_db.return_value.delete_session.side_effect = [RuntimeError("db locked"), RuntimeError("db locked"), None]
+        assert _delete_session_with_retries("s_x", attempts=3, delay=0) is True
+    assert m_db.return_value.delete_session.call_count == 3
+
+
+def test_delete_session_with_retries_returns_false_after_exhausting_attempts():
+    with patch("hermes_state.SessionDB") as m_db:
+        m_db.return_value.delete_session.side_effect = RuntimeError("db locked")
+        assert _delete_session_with_retries("s_x", attempts=3, delay=0) is False
+    assert m_db.return_value.delete_session.call_count == 3
+
+
+def test_permanently_failed_delete_is_queued_for_retry_not_silently_dropped(tmp_path):
+    # The fail-open bug this whole retry/pending_cleanup mechanism fixes:
+    # a session that could NOT be deleted must stay tracked (not silently
+    # forgotten just because a different, newer session is now live).
+    state_path = tmp_path / "mode-state.json"
+    _write_state(state_path, uncensored_session_id="s_old")
+    with patch("hermes_state.SessionDB") as m_db:
+        m_db.return_value.delete_session.side_effect = RuntimeError("db locked")
+        _reconcile_uncensored_session_tracking("s_new", state_path=state_path)
+    data = json.loads(state_path.read_text())
+    assert data["uncensored_session_id"] == "s_new"
+    assert data["uncensored_pending_cleanup"] == ["s_old"]
+
+
+def test_a_previously_queued_failure_is_retried_on_the_next_reconcile_call(tmp_path):
+    state_path = tmp_path / "mode-state.json"
+    _write_state(state_path, uncensored_session_id="s_new", uncensored_pending_cleanup=["s_old"])
+    with patch("hermes_state.SessionDB") as m_db:
+        # s_old finally succeeds this time; s_new is the same session
+        # continuing (a later turn), not itself being abandoned.
+        m_db.return_value.delete_session.return_value = None
+        _reconcile_uncensored_session_tracking("s_new", state_path=state_path)
+    m_db.return_value.delete_session.assert_called_once_with("s_old")
+    data = json.loads(state_path.read_text())
+    assert data["uncensored_pending_cleanup"] == []
+    assert data["uncensored_session_id"] == "s_new"
