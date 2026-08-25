@@ -1780,6 +1780,24 @@ def init_agent(
     # (background skill/memory review forks only).
     if _is_uncensored_session:
         _reconcile_uncensored_session_tracking(agent.session_id)
+        # Tony, 2026-08-25: "did we make it so that it does not save
+        # anything on memory, user memory, system memory and stuff like
+        # that?" The explicit "memory" tool is already blocked at
+        # call-time by mode/memory_guard.py's pre_tool_call hook -- but
+        # that leaves a separate gap: turn_context.py's own
+        # should_review_memory/should_review_skills triggers still fire
+        # normally, spawning turn_finalizer.py's _spawn_background_review
+        # fork (another full AIAgent, ~30K tokens/event) to read and
+        # process the "private" conversation regardless of whether its
+        # own eventual memory-write attempt gets blocked -- the exposure
+        # is in the processing itself, not just the write. Nothing
+        # connected skip_background_review to uncensored mode before this;
+        # only cron jobs set it (cron/scheduler.py). This is documented as
+        # "the single-switch off for both review paths" (memory AND
+        # skill), so it's the one flag that actually prevents the fork
+        # from spawning at all, rather than trusting every downstream path
+        # inside it to independently respect the same privacy guarantee.
+        agent.skip_background_review = True
     agent._session_init_model_config = {
         "max_iterations": agent.max_iterations,
         "reasoning_config": reasoning_config,
