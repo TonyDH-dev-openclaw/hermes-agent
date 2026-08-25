@@ -214,3 +214,4 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\hermes\hermes-agent\venv"
 MIT — see [LICENSE](../../LICENSE).
 
 Built by [Nous Research](https://nousresearch.com).
+# reconcile-watcher validation marker 2026-08-25T03:29:02Z

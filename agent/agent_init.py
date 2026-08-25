@@ -129,15 +129,16 @@ def _uncensored_mode_persist_disabled(profile_name: str, state_path=None) -> boo
     An EXISTING-but-unreadable state file (corrupt JSON, permission error)
     is a genuinely different situation: the file being there at all means
     /mode has switched something, and a read failure means we simply can't
-    tell what. Privacy-first: return True (suppress persistence) rather
+    tell what. Privacy-first: return True (treat as uncensored) rather
     than the reverse. This is a deliberate reversal of an earlier version
-    of this function that failed the other way (persist normally on read
-    error) -- reasoned at the time that a wrongly-suppressed ordinary
-    session was the worse outcome, but Tony's "no trace... anything that
-    can leave trace" is an explicit hard privacy guarantee, and a silent
-    leak the user never learns happened is worse than an ordinary session
-    losing its history under a rare, self-correcting failure (fix the
-    file, the very next session persists again)."""
+    of this function that failed the other way (treated as not-uncensored
+    on read error) -- reasoned at the time that a wrongly-suppressed
+    ordinary session was the worse outcome, but Tony's "no trace...
+    anything that can leave trace" is an explicit hard privacy guarantee,
+    and a silent leak the user never learns happened is worse than an
+    ordinary session losing its history under a rare, self-correcting
+    failure (fix the file, the very next session behaves correctly
+    again)."""
     path = state_path or (get_hermes_home() / "mode-state.json")
     if not path.exists():
         return False
@@ -148,6 +149,61 @@ def _uncensored_mode_persist_disabled(profile_name: str, state_path=None) -> boo
         return profile_name in data.get("backup", {})
     except Exception:
         return True
+
+
+def _reconcile_uncensored_session_tracking(session_id: str, state_path=None) -> None:
+    """Tony, 2026-08-24: "I want to see all the conversation we had [during
+    the uncensored session]. but after I go to a different session or make
+    a new one or change mode, it will erase everything including the one
+    in desktop app session history."
+
+    Uncensored-mode sessions used to simply never persist at all
+    (agent._persist_disabled) -- live-confirmed this also meant Desktop's
+    own chat view couldn't render the conversation while it was still
+    happening, since Desktop reads history from the same database nothing
+    was ever being written to. The fix is ephemeral persistence instead of
+    no persistence: write normally like any other session (so Desktop's
+    live view works), then actually delete the session once it's
+    abandoned, rather than never writing it in the first place.
+
+    This half covers two of the three abandonment triggers -- starting a
+    NEW session, or resuming a DIFFERENT existing one -- while
+    mode-state.json still says kind == "uncensored": both go through
+    agent_init.py same as this call, with a session_id that differs from
+    whichever one mode-state.json currently has recorded as "the live
+    uncensored session." The third trigger (switching mode away from
+    uncensored entirely) is handled separately in
+    ~/.hermes/plugins/mode/toggle.py's _restore_backup, which does not
+    pass through session init at all.
+
+    Deliberately silent on any failure (missing/corrupt state file, DB
+    error) -- this is best-effort bookkeeping layered on top of the
+    already-decided _uncensored_mode_persist_disabled() check; it must
+    never block or crash session init.
+    """
+    path = state_path or (get_hermes_home() / "mode-state.json")
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return
+    if data.get("kind") != "uncensored":
+        return
+    tracked = data.get("uncensored_session_id")
+    if tracked == session_id:
+        return  # same session continuing (e.g. a compression rebuild) -- nothing abandoned
+    if tracked:
+        try:
+            from hermes_state import SessionDB
+            SessionDB().delete_session(tracked)
+        except Exception:
+            logger.warning(
+                "failed to delete abandoned uncensored session %s", tracked, exc_info=True
+            )
+    data["uncensored_session_id"] = session_id
+    try:
+        path.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
 
 
 def _provider_default_routes(provider: str) -> set[str]:
@@ -1672,15 +1728,21 @@ def init_agent(
         _uncensored_check_profile = get_active_profile_name()
     except Exception:
         _uncensored_check_profile = None
-    agent._persist_disabled = (
+    _is_uncensored_session = (
         _uncensored_check_profile is not None
         and _uncensored_mode_persist_disabled(_uncensored_check_profile)
     )
-    if agent._persist_disabled:
-        # Overrides whatever sessions.write_json_snapshots config set above
-        # (line ~1481-1485) -- uncensored-mode's "no trace" guarantee must
-        # win over a config default, not be silently reverted by it.
-        agent._session_json_enabled = False
+    # Tony, 2026-08-24: uncensored mode used to hard-disable persistence
+    # for the whole session (agent._persist_disabled) -- that also broke
+    # Desktop's own live chat view, which reads history from the same
+    # database nothing was ever written to. Persist normally now; the
+    # "no trace" guarantee comes from actually deleting the session once
+    # it's abandoned instead (see _reconcile_uncensored_session_tracking
+    # below + mode/toggle.py's _restore_backup for the third trigger).
+    # agent._persist_disabled itself keeps its original, narrower meaning
+    # (background skill/memory review forks only).
+    if _is_uncensored_session:
+        _reconcile_uncensored_session_tracking(agent.session_id)
     agent._session_init_model_config = {
         "max_iterations": agent.max_iterations,
         "reasoning_config": reasoning_config,
