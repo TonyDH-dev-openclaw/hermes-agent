@@ -16555,6 +16555,22 @@ def _resume_voice_wake() -> None:
         _wake_resume_if_owner(owner)
 
 
+def _emit_voice_state_hook(state: str) -> None:
+    """Fire the voice_state_changed plugin hook so backend plugins (e.g.
+    pebble-signal) can reflect listening/speaking on a visual indicator.
+    wake.detected/voice.status/voice.transcript only reach the JSON-RPC
+    transport straight to the connected UI client -- no plugin hook exists
+    for any of them today, so this is new, additive instrumentation, not a
+    refactor of an existing signal. Fail-open, matching every other hook
+    call site in this file (e.g. _notify_session_boundary's on_session_end):
+    a broken or absent plugin must never break voice mode."""
+    try:
+        from hermes_cli.lifecycle import invoke_hook as _invoke_hook
+        _invoke_hook("voice_state_changed", state=state)
+    except Exception as exc:
+        logger.warning("voice_state_changed hook failed: %s", exc)
+
+
 def _voice_mode_enabled() -> bool:
     """Current voice-mode flag (runtime-only, CLI parity).
 
@@ -16625,6 +16641,7 @@ def _tts_stream_begin() -> Optional[queue.Queue]:
     if _voice_mode_enabled() and _voice_cfg_dict().get("barge_in", True):
         _arm_full_duplex_listener()
 
+    _emit_voice_state_hook("speaking")
     return text_queue
 
 
@@ -16657,6 +16674,10 @@ def _tts_stream_stop(user_barge: bool = True) -> None:
         stop_playback()
     except Exception:
         pass
+    # Only reached when a real active stream was stopped (the `if state is
+    # None: return` above already handled the no-op case) -- so this never
+    # fires a spurious "idle" when nothing was speaking to begin with.
+    _emit_voice_state_hook("idle")
 
 
 def _tts_stream_barge_in_monitor(stop: threading.Event, done: threading.Event) -> None:
@@ -17152,6 +17173,7 @@ def _(rid, params: dict) -> dict:
                 "profile": matched_profile or None,
                 "start_new_session": new_session,
             })
+            _emit_voice_state_hook("listening")
         finally:
             reset_transport(token)
 
@@ -17577,6 +17599,11 @@ def _(rid, params: dict) -> dict:
 
             def _on_status(state):
                 _voice_emit("voice.status", {"state": state})
+                # "transcribing" is a brief in-between STT step; folded into
+                # "listening" rather than introducing a new visual state --
+                # jarvis-voice's own state machine doesn't distinguish it
+                # either (see docs/superpowers/specs/2026-08-04-hermes-native-voice-pebble-bridge-design.md).
+                _emit_voice_state_hook("listening" if state == "transcribing" else state)
                 if state == "idle":
                     _resume_voice_wake()
 

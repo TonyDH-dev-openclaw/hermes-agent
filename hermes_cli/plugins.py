@@ -386,6 +386,14 @@ VALID_HOOKS: Set[str] = {
     #   alias_used: the exact token the user typed (str), args_raw: str,
     #   session_key: str | None (gateway), platform: str | None (gateway).
     "pre_command",
+    # Voice-loop state hook. Fired by tui_gateway.server._emit_voice_state_hook
+    # at wake detection, STT status changes, and TTS playback start/stop --
+    # the only places voice-loop state changes today, previously reaching the
+    # JSON-RPC transport straight to the connected UI client with no plugin
+    # visibility. Observers only: return values are ignored. Fail-open at the
+    # call site, so a broken/absent plugin never breaks voice mode.
+    # Kwargs: state: "listening" | "speaking" | "idle".
+    "voice_state_changed",
 }
 
 # Hooks whose return value carries a directive that the shell-hook response
