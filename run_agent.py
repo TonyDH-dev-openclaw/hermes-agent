@@ -6382,22 +6382,23 @@ class AIAgent:
         ):
             return
         already_streamed = self._interim_content_was_streamed(visible)
-        try:
-            from agent.plugin_stream_hooks import enqueue_plugin_stream_hook
+        if not self._stream_hooks_suppressed():
+            try:
+                from agent.plugin_stream_hooks import enqueue_plugin_stream_hook
 
-            enqueue_plugin_stream_hook(
-                "on_interim_message",
-                turn_id=getattr(self, "_current_turn_id", "") or "",
-                iteration=int(getattr(self, "_api_call_count", 0) or 0),
-                session_id=self.session_id or "",
-                model=self.model or "",
-                provider=self.provider or "",
-                surface=self.platform or "cli",
-                text=visible,
-                already_streamed=already_streamed,
-            )
-        except Exception:
-            logger.debug("on_interim_message plugin hook enqueue failed", exc_info=True)
+                enqueue_plugin_stream_hook(
+                    "on_interim_message",
+                    turn_id=getattr(self, "_current_turn_id", "") or "",
+                    iteration=int(getattr(self, "_api_call_count", 0) or 0),
+                    session_id=self.session_id or "",
+                    model=self.model or "",
+                    provider=self.provider or "",
+                    surface=self.platform or "cli",
+                    text=visible,
+                    already_streamed=already_streamed,
+                )
+            except Exception:
+                logger.debug("on_interim_message plugin hook enqueue failed", exc_info=True)
         cb = getattr(self, "interim_assistant_callback", None)
         if cb is None:
             return
@@ -6486,6 +6487,61 @@ class AIAgent:
                 where, _n,
             )
 
+    def _prime_stream_hooks_suppressed_cache(self) -> None:
+        """Populate _stream_hooks_suppressed_cache with a real DB read --
+        called once from _emit_stream_start (fires once per LLM-call
+        ITERATION, well before any delta), never from the hot per-delta
+        path itself. A first version of this check ran lazily inside
+        _stream_hooks_suppressed() instead, cached or not -- but a test
+        exercising _fire_stream_delta() in isolation caught the real
+        problem directly: the FIRST delta of any turn would still pay for
+        a synchronous SQLite read on the exact path this project's own
+        stream-consumer contract requires stays sub-50ms (the on-token
+        display/TTS path). Fails toward NOT suppressed (leave the cache
+        unset) on any error -- a missed suppression just means one
+        session's content is visible when it should have been hidden,
+        far better than adding real latency to every user-facing token."""
+        if getattr(self, "_stream_hooks_suppressed_cache", None) is not None:
+            return
+        try:
+            if self.session_id:
+                from hermes_state import SessionDB
+                row = SessionDB().get_session(self.session_id)
+                self._stream_hooks_suppressed_cache = bool(row and row.get("hidden"))
+        except Exception:
+            pass
+
+    def _stream_hooks_suppressed(self) -> bool:
+        """True when this turn's plugin stream hooks must not fire --
+        either the existing _persist_disabled case (background skill/
+        memory review fork) or a session explicitly marked hidden. Pure
+        attribute reads only -- see _prime_stream_hooks_suppressed_cache
+        for where the one real DB read actually happens.
+
+        Tony's mega-message, 2026-08: "I see this random ai saying stuff
+        that I did not ask about... I see this again after sleep or
+        hibernation but then it disappears after a few seconds."
+        Root-caused: voice-bridge's validate_alive() resume-check
+        (server.py's _resume_watcher, every ~30s after a detected sleep/
+        wake gap) sends a real prompt ("Reply with exactly: ok") through
+        its own dedicated hermes-agent ACP subprocess -- spawned with the
+        DEFAULT profile's config (HERMES_ACP_CMD has no -p flag), the
+        exact same one pebble-signal loads in. This is a perfectly
+        ordinary turn (not persist_disabled -- it isn't a background-
+        review fork), so the existing gate never caught it: its stream
+        hooks fired normally and pebble-signal forwarded them to pebble-
+        app's Live Response box, exactly matching what Tony described.
+        voice-bridge already marks this session hidden in state.db
+        (acp_client.py's _hide_standalone_session, added for the
+        SEPARATE-but-related "I still see the session in my session
+        list" fix) specifically so it stays out of user-visible surfaces
+        -- reusing that same signal here for the SAME reason covers this
+        leak too, without needing a second, parallel suppression
+        mechanism."""
+        if getattr(self, "_persist_disabled", False):
+            return True
+        return bool(getattr(self, "_stream_hooks_suppressed_cache", False))
+
     def _stream_hook_base_payload(self) -> Dict[str, Any]:
         return {
             "turn_id": getattr(self, "_current_turn_id", "") or "",
@@ -6497,6 +6553,9 @@ class AIAgent:
         }
 
     def _emit_stream_start(self) -> None:
+        self._prime_stream_hooks_suppressed_cache()
+        if self._stream_hooks_suppressed():
+            return
         try:
             from agent.plugin_stream_hooks import enqueue_plugin_stream_hook
 
@@ -6505,6 +6564,8 @@ class AIAgent:
             logger.debug("on_stream_start plugin hook enqueue failed", exc_info=True)
 
     def _emit_stream_end(self, *, final_text: str, finished: bool, error: str | None) -> None:
+        if self._stream_hooks_suppressed():
+            return
         try:
             from agent.plugin_stream_hooks import enqueue_plugin_stream_hook
 
@@ -6573,17 +6634,18 @@ class AIAgent:
                 delivered = True
             except Exception:
                 pass
-        try:
-            from agent.plugin_stream_hooks import enqueue_plugin_stream_hook
+        if not self._stream_hooks_suppressed():
+            try:
+                from agent.plugin_stream_hooks import enqueue_plugin_stream_hook
 
-            enqueue_plugin_stream_hook(
-                "on_stream_delta",
-                **self._stream_hook_base_payload(),
-                delta=text,
-                kind="text",
-            )
-        except Exception:
-            logger.debug("on_stream_delta plugin hook enqueue failed", exc_info=True)
+                enqueue_plugin_stream_hook(
+                    "on_stream_delta",
+                    **self._stream_hook_base_payload(),
+                    delta=text,
+                    kind="text",
+                )
+            except Exception:
+                logger.debug("on_stream_delta plugin hook enqueue failed", exc_info=True)
         if delivered:
             self._record_streamed_assistant_text(text)
 
@@ -6600,18 +6662,19 @@ class AIAgent:
                 cb(text)
             except Exception:
                 pass
-        try:
-            from agent.plugin_stream_hooks import enqueue_plugin_stream_hook, stream_reasoning_deltas_enabled
+        if not self._stream_hooks_suppressed():
+            try:
+                from agent.plugin_stream_hooks import enqueue_plugin_stream_hook, stream_reasoning_deltas_enabled
 
-            if stream_reasoning_deltas_enabled():
-                enqueue_plugin_stream_hook(
-                    "on_stream_delta",
-                    **self._stream_hook_base_payload(),
-                    delta=text,
-                    kind="reasoning",
-                )
-        except Exception:
-            logger.debug("reasoning on_stream_delta plugin hook enqueue failed", exc_info=True)
+                if stream_reasoning_deltas_enabled():
+                    enqueue_plugin_stream_hook(
+                        "on_stream_delta",
+                        **self._stream_hook_base_payload(),
+                        delta=text,
+                        kind="reasoning",
+                    )
+            except Exception:
+                logger.debug("reasoning on_stream_delta plugin hook enqueue failed", exc_info=True)
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify display layer that the model is generating tool call arguments.
