@@ -17390,7 +17390,7 @@ function createUpdateBlockerTray(): void {
   updateBlockerTray.setContextMenu(
     Menu.buildFromTemplate([
       {
-        label: 'Close processes blocking update',
+        label: 'Unblock update',
         click: () => {
           forceCloseUpdateBlockingProcesses().catch(err => {
             rememberLog(`[tray] force-close failed: ${err instanceof Error ? err.message : String(err)}`)
