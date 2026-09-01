@@ -27,8 +27,7 @@ import {
   screen,
   session,
   shell,
-  systemPreferences,
-  Tray
+  systemPreferences
 } from 'electron'
 
 import { classifyActiveRuntime } from './active-runtime-state'
@@ -17331,98 +17330,6 @@ app.on('open-url', (event, url) => {
   handleDeepLink(url)
 })
 
-let updateBlockerTray: InstanceType<typeof Tray> | null = null
-
-/**
- * System-tray escape hatch for the update preflight's blocker dialog
- * ("Close other processes to update Hermes") -- that dialog only reports
- * holders it judged unsafe to auto-stop (our own backend, the reconcile
- * watcher, its launcher script), it never offers to close them itself.
- * Force-killing them is safe here ONLY because the user triggers this
- * deliberately, one click, fully aware it kills Hermes's own running
- * backend along with the rest.
- */
-async function forceCloseUpdateBlockingProcesses(): Promise<void> {
-  const updateRoot = resolveUpdateRoot()
-  const outcome = await scanVenvBlockers(updateRoot)
-
-  if (outcome.kind === 'probe-failure') {
-    new Notification({ title: 'Hermes', body: `Could not scan for blocking processes: ${outcome.error}` }).show()
-
-    return
-  }
-
-  if (outcome.kind === 'clear' || outcome.result.processes.length === 0) {
-    new Notification({ title: 'Hermes', body: 'No processes are blocking an update.' }).show()
-
-    return
-  }
-
-  const killed: string[] = []
-
-  for (const proc of outcome.result.processes) {
-    forceKillProcessTree(proc.pid)
-    killed.push(`${proc.name} (PID ${proc.pid})`)
-  }
-
-  rememberLog(`[tray] force-closed update blockers: ${killed.join(', ')}`)
-  new Notification({
-    title: 'Hermes',
-    body: `Closed ${killed.length} process${killed.length === 1 ? '' : 'es'}. You can retry the update now.`
-  }).show()
-}
-
-// Windows-only: the blocker dialog this pairs with only ever fires on
-// Windows (the .pyd lock hazard it guards against is a Windows phenomenon).
-function createUpdateBlockerTray(): void {
-  if (!IS_WINDOWS || updateBlockerTray) {
-    return
-  }
-
-  const iconPath = getAppIconPath()
-
-  if (!iconPath) {
-    return
-  }
-
-  updateBlockerTray = new Tray(iconPath)
-  updateBlockerTray.setToolTip('Hermes')
-  updateBlockerTray.setContextMenu(
-    Menu.buildFromTemplate([
-      {
-        label: 'Close processes blocking update',
-        click: () => {
-          forceCloseUpdateBlockingProcesses().catch(err => {
-            rememberLog(`[tray] force-close failed: ${err instanceof Error ? err.message : String(err)}`)
-          })
-        }
-      },
-      { type: 'separator' },
-      {
-        label: 'Show Hermes',
-        click: () => {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            focusWindow(mainWindow)
-          } else {
-            createWindow()
-          }
-        }
-      },
-      { type: 'separator' },
-      {
-        label: 'Quit Hermes',
-        click: () => app.quit()
-      }
-    ])
-  )
-
-  updateBlockerTray.on('click', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      focusWindow(mainWindow)
-    }
-  })
-}
-
 app.whenReady().then(() => {
   // Warm the login-shell PATH resolution immediately so it usually completes
   // before the backend start path awaits the same single-flight promise.
@@ -17499,7 +17406,6 @@ app.whenReady().then(() => {
   // captured by the original transaction before removing the journal entry.
   void resumeManagedSshRecoveries()
   createWindow()
-  createUpdateBlockerTray()
 
   // Win/Linux cold start: the launching hermes:// URL is in our own argv.
   const _coldStartLink = _extractDeepLink(process.argv)
