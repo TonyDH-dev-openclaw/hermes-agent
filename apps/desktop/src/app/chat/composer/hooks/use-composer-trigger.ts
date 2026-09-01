@@ -183,19 +183,6 @@ export function useComposerTrigger({
         ? null
         : found
 
-    if (found?.kind === '/' && slashArgStage(found.query)) {
-      // TEMP DEBUG (remove once /mode dropdown is confirmed fixed) --
-      // prints the resolved argument mode straight from in-memory state,
-      // bypassing the network tab entirely.
-      // eslint-disable-next-line no-console
-      console.log('[hermes-debug/argmode]', {
-        query: found.query,
-        token: slashCommandToken(found.query),
-        argumentMode,
-        triggerWillClose: argumentMode !== 'options' && argumentMode !== 'mixed'
-      })
-    }
-
     setTrigger(detected)
 
     // Only reset the highlight when the trigger actually changed (opened, or

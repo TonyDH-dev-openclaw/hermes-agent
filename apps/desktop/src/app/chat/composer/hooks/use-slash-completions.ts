@@ -78,14 +78,9 @@ export function useSlashCompletions(options: {
     void cachedSlashCompletion('catalog', () => gateway.request<CommandsCatalogLike>('commands.catalog'))
       .then(catalog => {
         filterDesktopCommandsCatalog(catalog)
-        // TEMP DEBUG (remove once /mode dropdown is confirmed fixed)
-        // eslint-disable-next-line no-console
-        console.log('[hermes-debug/catalog]', catalog.commands?.['/mode'])
       })
-      .catch(err => {
+      .catch(() => {
         // Next keystroke retries; don't block the composer on a warm-up miss.
-        // eslint-disable-next-line no-console
-        console.log('[hermes-debug/catalog] warm-up fetch FAILED', err)
       })
   }, [gateway, epoch])
 
