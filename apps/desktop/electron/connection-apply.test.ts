@@ -105,6 +105,7 @@ describe('resolveTerminalConnection', () => {
     // synchronized with that exact promise). Simulates getTarget flipping
     // to the real target on the 4th poll, not the 1st.
     const target = { ssh: {}, scope: '' }
+
     const getTarget = vi
       .fn()
       .mockReturnValueOnce('pending') // pre-check
@@ -113,6 +114,7 @@ describe('resolveTerminalConnection', () => {
       .mockReturnValueOnce('pending') // poll 2
       .mockReturnValueOnce('pending') // poll 3
       .mockReturnValueOnce(target) // poll 4
+
     const ensureBackend = vi.fn(async () => undefined)
     const delays: number[] = []
 

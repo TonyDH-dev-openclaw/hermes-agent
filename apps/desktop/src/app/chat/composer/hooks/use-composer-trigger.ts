@@ -379,6 +379,7 @@ export function useComposerTrigger({
     const command = (item.metadata as { command?: string } | undefined)?.command ?? ''
 
     const argumentMode = desktopSlashCommandArgumentMode(command)
+
     const expandsToArgs =
       trigger.kind === '/' && !trigger.inline && !serialized.trim().includes(' ') && argumentMode !== null
 
