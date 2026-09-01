@@ -514,6 +514,9 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
 # Dispatch
 # ---------------------------------------------------------------------------
 
+_MAX_BATCH_SIZE = 20
+
+
 def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     """Main entry point — dispatched by tools.registry.
 
@@ -523,6 +526,8 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     action = (args.get("action") or "").strip().lower()
     if not action:
         return json.dumps({"error": "missing `action`"})
+    if action == "batch":
+        return _handle_batch(args, kwargs)
     # Per-run key for approval-state and daemon-mode isolation across
     # concurrent sessions.
     session_id = str(kwargs.get("session_id") or "")
@@ -586,6 +591,103 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     except Exception as e:
         logger.exception("computer_use %s failed", action)
         return json.dumps({"error": f"{action} failed: {e}"})
+
+
+def _summarize_step_result(result: Any) -> Tuple[bool, Optional[str]]:
+    """(ok, error) for one batch step's raw handle_computer_use() return.
+
+    Two distinct failure shapes exist in this module: pre-dispatch
+    validation/approval failures are ``{"error": "..."}`` (no "ok" key at
+    all), while a dispatched action's own failure is
+    ``{"ok": False, "action": ..., "message": "..."}`` from _action_payload
+    (no "error" key). Both must be treated as failure. A multimodal dict is
+    only ever produced by a capture that already succeeded (see this
+    module's own "Return contract" docstring), so its mere presence is
+    success.
+    """
+    if isinstance(result, dict) and result.get("_multimodal"):
+        return True, None
+    try:
+        parsed = json.loads(result)
+    except Exception:
+        return False, "unparseable result"
+    if not isinstance(parsed, dict):
+        return True, None
+    if "error" in parsed:
+        return False, str(parsed["error"])
+    if parsed.get("ok") is False:
+        return False, str(parsed.get("message") or "action failed")
+    return True, None
+
+
+def _format_batch_summary(steps: list, requested: int) -> str:
+    lines = [f"batch: {len(steps)}/{requested} step(s) run"]
+    for s in steps:
+        marker = "ok" if s["ok"] else "FAILED"
+        detail = f" — {s['error']}" if s.get("error") else ""
+        lines.append(f"  [{s['index']}] {s.get('action', '?')}: {marker}{detail}")
+    return "\n".join(lines)
+
+
+def _handle_batch(args: Dict[str, Any], kwargs: Dict[str, Any]) -> Any:
+    """Run a sequence of ordinary computer_use actions in one tool call.
+
+    Each entry goes through the FULL handle_computer_use() pipeline
+    (validation, per-action approval gating, dispatch) exactly as if it had
+    been called on its own — batching only removes the round-trip between
+    steps, it does not change or widen what gets auto-approved. Stops at the
+    first failing step so a bad click can't cascade into worse actions
+    against a UI state the caller no longer understands.
+    """
+    sub_actions = args.get("actions")
+    if not isinstance(sub_actions, list) or not sub_actions:
+        return json.dumps({"error": "batch requires a non-empty 'actions' list"})
+    if len(sub_actions) > _MAX_BATCH_SIZE:
+        return json.dumps({
+            "error": f"batch too large: {len(sub_actions)} entries, max {_MAX_BATCH_SIZE}",
+        })
+
+    steps: list = []
+    last_result: Any = None
+    for i, sub in enumerate(sub_actions):
+        sub_action = (sub.get("action") or "").strip().lower() if isinstance(sub, dict) else ""
+        if not sub_action:
+            steps.append({"index": i, "ok": False, "error": "each batch entry needs an 'action'"})
+            last_result = None
+            break
+        if sub_action == "batch":
+            steps.append({"index": i, "ok": False, "error": "batch cannot contain a nested batch"})
+            last_result = None
+            break
+        last_result = handle_computer_use(sub, **kwargs)
+        ok, err = _summarize_step_result(last_result)
+        step = {"index": i, "action": sub_action, "ok": ok}
+        if err:
+            step["error"] = err
+        steps.append(step)
+        if not ok:
+            break
+
+    summary_text = _format_batch_summary(steps, requested=len(sub_actions))
+
+    if isinstance(last_result, dict) and last_result.get("_multimodal"):
+        merged = dict(last_result)
+        merged["text_summary"] = summary_text
+        content = list(merged.get("content") or [])
+        if content and content[0].get("type") == "text":
+            content[0] = {"type": "text", "text": summary_text}
+        else:
+            content.insert(0, {"type": "text", "text": summary_text})
+        merged["content"] = content
+        return merged
+
+    return json.dumps({
+        "batch": True,
+        "steps": steps,
+        "completed": len(steps),
+        "requested": len(sub_actions),
+        "summary": summary_text,
+    })
 
 
 def _request_approval(action: str, args: Dict[str, Any],
