@@ -2191,6 +2191,7 @@ class PluginContext:
         description: str = "",
         args_hint: str = "",
         argument_mode: str | None = None,
+        subcommands: tuple[str, ...] = (),
     ) -> Optional[PluginRegistration]:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
@@ -2209,8 +2210,9 @@ class PluginContext:
         as free-form chat.
 
         ``argument_mode`` tells the desktop composer how text after the command
-        name behaves (``options``, ``text``, or ``mixed``). Omit it to infer
-        ``text`` whenever ``args_hint`` is set, so ``/myplugin `` stays typeable.
+        name behaves (``options``, ``text``, or ``mixed``). Omit it to infer:
+        ``options`` when ``subcommands`` is a fixed choice list, else ``text``
+        whenever ``args_hint`` is set, so ``/myplugin `` stays typeable.
 
         Names conflicting with built-in commands are rejected with a warning.
         """
@@ -2237,9 +2239,14 @@ class PluginContext:
 
         previous = self._manager._plugin_commands.get(clean)
         hint = (args_hint or "").strip()
-        mode = argument_mode if argument_mode in {"options", "text", "mixed"} else (
-            "text" if hint else None
-        )
+        if argument_mode in {"options", "text", "mixed"}:
+            mode = argument_mode
+        elif subcommands:
+            mode = "options"
+        elif hint:
+            mode = "text"
+        else:
+            mode = None
         entry = {
             "handler": handler,
             "description": description or "Plugin command",
@@ -2247,6 +2254,7 @@ class PluginContext:
             "plugin_key": self.manifest.key or self.manifest.name,
             "args_hint": hint,
             "argument_mode": mode,
+            "subcommands": tuple(subcommands or ()),
         }
         self._manager._plugin_commands[clean] = entry
         handle = self._track_replacement(

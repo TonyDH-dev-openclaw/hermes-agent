@@ -358,7 +358,13 @@ def _(rid, params: dict) -> dict:
                     hint = str(info.get("args_hint") or "").strip()
                     mode = info.get("argument_mode")
                     if mode not in {"options", "text", "mixed"}:
-                        mode = "text" if hint else None
+                        subcommands = info.get("subcommands")
+                        if subcommands:
+                            mode = "options"
+                        elif hint:
+                            mode = "text"
+                        else:
+                            mode = None
                     commands[key] = {"argument_mode": mode, "desktop": None}
         except Exception as e:
             if not warning:
