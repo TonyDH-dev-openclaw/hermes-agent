@@ -1130,7 +1130,10 @@ def _check_and_erase_abandoned_uncensored_session(sid: str, *, state_path=None) 
         return
     with _sessions_lock:
         current = _sessions.get(sid)
-        reconnected = current is not None and not _ws_session_is_detached(current)
+        # local-fixes note: this branch has _ws_session_is_orphaned (not
+        # main's _ws_session_is_detached) -- same "is this on the drop
+        # sentinel transport" check, different name.
+        reconnected = current is not None and not _ws_session_is_orphaned(current)
     if reconnected:
         # Tony reopened the client and it auto-resumed this SAME session
         # within the grace window -- genuinely still in use, not abandoned.
